@@ -1,207 +1,362 @@
-/* Lucid Slides - client-side PPTX simplification engine.
-   Runs entirely in the browser (no server, no upload of your file anywhere).
-   Requires JSZip to already be loaded as a global (window.JSZip).
-*/
+/* Lucid Slides — read-only PPTX analysis engine.
+ *
+ * Safety contract:
+ * - Reads ZIP entries without replacing or serializing any OOXML part.
+ * - Never generates a PPTX, Blob, or modified package.
+ * - Never applies threshold-based text, style, image, or structure edits.
+ * - Produces review findings and validates optional AI proposals only.
+ */
 
-const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const SLIDE_PATH = /^ppt\/slides\/slide(\d+)\.xml$/;
+const REQUIRED_PARTS = ["[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"];
+const PLACEHOLDER_TEXT = "AI analysis required — Lucid Slides will not guess which wording or element is important.";
 
-const RULE_CONFIG = {
-  maxWordsPerLine: 12,
-  maxBoldWords: 4,
-  boldFraction: 0.2,
-  minLinesForFlag: 3,
-  tinyImageEmuThreshold: 457200, // ~0.5 inch, EMUs (914400 EMU = 1 inch)
-  maxStatFontHundredths: 9600, // cap enlarged stats at 96pt so they can't blow up
-};
-
-// Table cells hold factual/tabular data - trimming or rewording them risks
-// breaking the table's meaning, so paragraphs inside <a:tc> are left alone.
-function isInsideTableCell(node) {
-  let cur = node.parentNode;
-  while (cur && cur.nodeType === 1) {
-    if (cur.tagName === "a:tc") return true;
-    cur = cur.parentNode;
-  }
-  return false;
+function decodeXml(value = "") {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&amp;/g, "&");
 }
 
-// Never rebuild a paragraph that contains a hyperlink run - collapsing runs
-// would silently delete the link.
-function hasHyperlinkRun(runs) {
-  return runs.some((r) => {
-    const rPr = r.getElementsByTagName("a:rPr")[0];
-    return rPr && rPr.getElementsByTagName("a:hlinkClick").length > 0;
-  });
+function readAttribute(xml = "", name) {
+  const match = xml.match(new RegExp(`\\b${name}="([^"]*)"`));
+  return match ? decodeXml(match[1]) : "";
 }
 
-async function simplifyPptx(arrayBuffer, onProgress) {
-  const zip = await JSZip.loadAsync(arrayBuffer);
+function textFromXml(xml = "") {
+  return Array.from(xml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g), (match) => decodeXml(match[1])).join("");
+}
 
-  const slideFiles = Object.keys(zip.files)
-    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-    .sort((a, b) => {
-      const na = parseInt(a.match(/slide(\d+)\.xml/)[1], 10);
-      const nb = parseInt(b.match(/slide(\d+)\.xml/)[1], 10);
-      return na - nb;
-    });
+function wordCount(text = "") {
+  const value = String(text).trim();
+  return value ? value.split(/\s+/).length : 0;
+}
 
-  if (!slideFiles.length) {
-    throw new Error("Couldn't find any slides in this file - is it a valid .pptx?");
+function boldWordCount(paragraphXml = "") {
+  let count = 0;
+  for (const run of paragraphXml.matchAll(/<a:r\b[\s\S]*?<\/a:r>/g)) {
+    const runXml = run[0];
+    const properties = runXml.match(/<a:rPr\b[^>]*>/)?.[0] || "";
+    if (/\bb="(?:1|true)"/.test(properties)) count += wordCount(textFromXml(runXml));
+  }
+  return count;
+}
+
+function elementType(elementXml, tagName) {
+  if (tagName === "pic") return "image";
+  if (/<a:tbl\b/.test(elementXml)) return "table";
+  if (/<c:chart\b/.test(elementXml)) return "chart";
+  const placeholder = elementXml.match(/<p:ph\b[^>]*>/)?.[0] || "";
+  const placeholderType = readAttribute(placeholder, "type");
+  if (placeholderType === "title" || placeholderType === "ctrTitle") return "title";
+  return "text";
+}
+
+export function analyzeSlideXml(xml, slideNumber) {
+  if (typeof xml !== "string" || !/<p:sld\b/.test(xml)) {
+    throw new Error(`Slide ${slideNumber} is not valid PresentationML.`);
   }
 
-  const report = [];
-
-  for (const path of slideFiles) {
-    const slideNum = parseInt(path.match(/slide(\d+)\.xml/)[1], 10);
-    if (onProgress) onProgress(`Reading slide ${slideNum}...`);
-
-    const xmlText = await zip.file(path).async("string");
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, "application/xml");
-
-    if (doc.getElementsByTagName("parsererror").length) {
-      report.push({ slide: slideNum, changes: [], flags: [`Could not parse this slide's XML - left untouched.`] });
-      continue;
-    }
-
-    const slideReport = { slide: slideNum, changes: [], flags: [] };
-    let totalNonEmptyLines = 0;
-
-    const paragraphs = Array.from(doc.getElementsByTagName("a:p"));
-    let hyperlinksPreserved = 0;
-    for (const p of paragraphs) {
-      const runs = Array.from(p.getElementsByTagName("a:r"));
-      if (!runs.length) continue;
-      if (isInsideTableCell(p)) continue;
-
-      let fullText = "";
-      runs.forEach((r) => {
-        const tNodes = r.getElementsByTagName("a:t");
-        if (tNodes.length) fullText += tNodes[0].textContent;
+  const elements = [];
+  let fallbackId = 0;
+  for (const match of xml.matchAll(/<p:(sp|graphicFrame|pic)\b[\s\S]*?<\/p:\1>/g)) {
+    fallbackId += 1;
+    const tagName = match[1];
+    const elementXml = match[0];
+    const nonVisual = elementXml.match(/<p:cNvPr\b[^>]*>/)?.[0] || "";
+    const objectId = readAttribute(nonVisual, "id") || `unknown-${fallbackId}`;
+    const name = readAttribute(nonVisual, "name") || `${tagName} ${objectId}`;
+    const paragraphs = [];
+    let paragraphIndex = 0;
+    for (const paragraphMatch of elementXml.matchAll(/<a:p\b[\s\S]*?<\/a:p>/g)) {
+      const paragraphXml = paragraphMatch[0];
+      const text = textFromXml(paragraphXml);
+      if (!text.trim()) continue;
+      const words = wordCount(text);
+      paragraphs.push({
+        index: paragraphIndex,
+        text,
+        wordCount: words,
+        boldWordCount: boldWordCount(paragraphXml),
+        hasHyperlink: /<a:hlinkClick\b/.test(paragraphXml),
+        isBullet: /<a:bu(?:Char|AutoNum|Blip)\b/.test(paragraphXml),
       });
-      if (!fullText.trim()) continue;
-      totalNonEmptyLines++;
-
-      if (hasHyperlinkRun(runs)) {
-        hyperlinksPreserved++;
-        continue;
-      }
-
-      const trimmedText = fullText.trim();
-      const words = trimmedText.split(/\s+/);
-      const isStandaloneStat = words.length === 1 && /^\$?\d[\d,.]*%?$/.test(trimmedText);
-
-      if (isStandaloneStat) {
-        // Rule 6: make the key statistic bigger. Adding real context text
-        // ("+34% engagement" instead of "34%") needs to know what the stat
-        // means, so that part is left for a human - only sizing is automatic.
-        runs.forEach((r) => {
-          let rPr = r.getElementsByTagName("a:rPr")[0];
-          if (!rPr) {
-            rPr = doc.createElementNS(A_NS, "a:rPr");
-            r.insertBefore(rPr, r.firstChild);
-          }
-          const currentSz = rPr.getAttribute("sz");
-          const rawSz = currentSz ? Math.round(parseInt(currentSz, 10) * 1.5) : 4500;
-          const newSz = Math.min(rawSz, RULE_CONFIG.maxStatFontHundredths);
-          rPr.setAttribute("sz", String(newSz));
-        });
-        slideReport.changes.push(`Enlarged the standalone statistic "${trimmedText}".`);
-        slideReport.flags.push(`Add context to "${trimmedText}" by hand, e.g. "+${trimmedText} engagement" (rule 6 needs to know what the number means).`);
-        continue;
-      }
-
-      let newFullText = fullText;
-      let trimmed = false;
-      if (words.length > RULE_CONFIG.maxWordsPerLine) {
-        newFullText = words.slice(0, RULE_CONFIG.maxWordsPerLine).join(" ") + "...";
-        trimmed = true;
-      }
-
-      const newWords = newFullText.replace(/\.\.\.$/, "").trim().split(/\s+/);
-      const boldCount =
-        newWords.length >= 3
-          ? Math.min(RULE_CONFIG.maxBoldWords, Math.ceil(newWords.length * RULE_CONFIG.boldFraction) + 1)
-          : 0;
-
-      if (trimmed || boldCount > 0) {
-        const templateRPr = runs[0].getElementsByTagName("a:rPr")[0] || null;
-        const endParaRPr = p.getElementsByTagName("a:endParaRPr")[0] || null;
-
-        runs.forEach((r) => p.removeChild(r));
-
-        const makeRun = (text, bold) => {
-          const r = doc.createElementNS(A_NS, "a:r");
-          if (templateRPr || bold) {
-            const rPr = templateRPr ? templateRPr.cloneNode(true) : doc.createElementNS(A_NS, "a:rPr");
-            if (bold) rPr.setAttribute("b", "1");
-            r.appendChild(rPr);
-          }
-          const t = doc.createElementNS(A_NS, "a:t");
-          t.textContent = text;
-          r.appendChild(t);
-          return r;
-        };
-
-        if (boldCount > 0) {
-          const boldPhrase = newWords.slice(0, boldCount).join(" ");
-          const rest = newFullText.slice(boldPhrase.length);
-          p.insertBefore(makeRun(boldPhrase, true), endParaRPr);
-          if (rest.length) p.insertBefore(makeRun(rest, false), endParaRPr);
-        } else {
-          p.insertBefore(makeRun(newFullText, false), endParaRPr);
-        }
-
-        if (trimmed) slideReport.changes.push(`Trimmed a line to ${RULE_CONFIG.maxWordsPerLine} words.`);
-        if (boldCount > 0) slideReport.changes.push(`Bolded the first ${boldCount} word(s) of a line.`);
-      }
+      paragraphIndex += 1;
     }
-
-    if (hyperlinksPreserved) {
-      slideReport.flags.push(`${hyperlinksPreserved} line(s) contain a link - left completely untouched so the link isn't broken. Trim/bold those by hand if needed.`);
-    }
-
-    // Rule 8: flag charts for manual attention (can't safely script chart-data edits).
-    const chartFrames = Array.from(doc.getElementsByTagName("p:graphicFrame")).filter(
-      (gf) => gf.getElementsByTagName("c:chart").length > 0
-    );
-    if (chartFrames.length) {
-      slideReport.flags.push(`Has a chart - manually emphasize the data that supports your takeaway, fade the rest, and change the chart title into a conclusion (rule 8). Reading and rewriting chart data needs a human.`);
-    }
-
-    // Rule 9: drop small images that read as decorative.
-    const pics = Array.from(doc.getElementsByTagName("p:pic"));
-    let removedImages = 0;
-    pics.forEach((pic) => {
-      const ext = pic.getElementsByTagName("a:ext")[0];
-      if (!ext) return;
-      const cx = parseInt(ext.getAttribute("cx") || "0", 10);
-      const cy = parseInt(ext.getAttribute("cy") || "0", 10);
-      if (cx > 0 && cy > 0 && cx < RULE_CONFIG.tinyImageEmuThreshold && cy < RULE_CONFIG.tinyImageEmuThreshold) {
-        pic.parentNode.removeChild(pic);
-        removedImages++;
-      }
+    const relationshipId = readAttribute(elementXml.match(/<a:blip\b[^>]*>/)?.[0] || "", "r:embed") ||
+      readAttribute(elementXml.match(/<a:blip\b[^>]*>/)?.[0] || "", "r:link");
+    elements.push({
+      objectId,
+      name,
+      type: elementType(elementXml, tagName),
+      text: paragraphs.map((paragraph) => paragraph.text).join("\n"),
+      paragraphs,
+      relationshipId: relationshipId || null,
+      hasHyperlink: paragraphs.some((paragraph) => paragraph.hasHyperlink),
     });
-    if (removedImages) slideReport.changes.push(`Removed ${removedImages} small image(s) that looked decorative.`);
-
-    if (totalNonEmptyLines >= RULE_CONFIG.minLinesForFlag) {
-      slideReport.flags.push(
-        `${totalNonEmptyLines} lines of text on one slide - add a progressive "Appear" build in PowerPoint's Animations pane (rules 7 & 11), or split into multiple slides (rule 10). Both need your judgment, so they're not done automatically.`
-      );
-    }
-    slideReport.flags.push(`Confirm the title states the one main takeaway in <=10 words (rules 1-2), and that one element is clearly the most visually dominant thing on the slide (rule 5).`);
-
-    if (slideReport.changes.length || slideReport.flags.length) report.push(slideReport);
-
-    const serializer = new XMLSerializer();
-    zip.file(path, serializer.serializeToString(doc));
   }
 
-  if (onProgress) onProgress("Packaging the simplified file...");
-  const blob = await zip.generateAsync({
-    type: "blob",
-    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  });
-
-  return { blob, report };
+  return {
+    slide: Number(slideNumber),
+    elements,
+    counts: {
+      images: elements.filter((element) => element.type === "image").length,
+      tables: elements.filter((element) => element.type === "table").length,
+      charts: elements.filter((element) => element.type === "chart").length,
+      hyperlinks: elements.reduce(
+        (sum, element) => sum + element.paragraphs.filter((paragraph) => paragraph.hasHyperlink).length,
+        0,
+      ),
+      words: elements.reduce((sum, element) => sum + wordCount(element.text), 0),
+    },
+  };
 }
+
+function findingId(slide, element, paragraph, rule) {
+  return `slide-${slide}-element-${element.objectId}-paragraph-${paragraph?.index ?? "all"}-rule-${rule}`;
+}
+
+export function buildLocalFindings(slides) {
+  const findings = [];
+  for (const slide of slides) {
+    for (const element of slide.elements) {
+      if (element.type === "title" && wordCount(element.text) > 10) {
+        findings.push({
+          id: findingId(slide.slide, element, null, 2),
+          slide: slide.slide,
+          objectId: element.objectId,
+          elementName: element.name,
+          elementType: element.type,
+          originalText: element.text,
+          proposedText: null,
+          placeholderText: PLACEHOLDER_TEXT,
+          rule: 2,
+          explanation: "The title exceeds the rule-of-thumb length. Shortening it requires understanding the slide's actual takeaway, so no rewrite was attempted.",
+          actionable: false,
+          source: "local-analysis",
+        });
+      }
+
+      for (const paragraph of element.paragraphs) {
+        if (element.type !== "title" && paragraph.wordCount > 12) {
+          findings.push({
+            id: findingId(slide.slide, element, paragraph, 3),
+            slide: slide.slide,
+            objectId: element.objectId,
+            elementName: element.name,
+            elementType: element.type,
+            originalText: paragraph.text,
+            proposedText: null,
+            placeholderText: PLACEHOLDER_TEXT,
+            rule: 3,
+            explanation: "This passage may be difficult to scan. Deciding what is repeated or nonessential is a meaning-based judgment, so every word was preserved.",
+            actionable: false,
+            source: "local-analysis",
+          });
+        }
+        if (paragraph.wordCount > 0 && paragraph.boldWordCount / paragraph.wordCount > 0.2) {
+          findings.push({
+            id: findingId(slide.slide, element, paragraph, 4),
+            slide: slide.slide,
+            objectId: element.objectId,
+            elementName: element.name,
+            elementType: element.type,
+            originalText: paragraph.text,
+            proposedText: null,
+            placeholderText: PLACEHOLDER_TEXT,
+            rule: 4,
+            explanation: "More than about 20% of this statement is bold. Choosing which words deserve emphasis requires semantic judgment, so formatting was not changed.",
+            actionable: false,
+            source: "local-analysis",
+          });
+        }
+      }
+    }
+
+    if (slide.counts.charts) {
+      findings.push({
+        id: `slide-${slide.slide}-chart-rule-8`,
+        slide: slide.slide,
+        objectId: null,
+        elementName: "Chart",
+        elementType: "chart",
+        originalText: "Chart content and styling preserved exactly.",
+        proposedText: null,
+        placeholderText: PLACEHOLDER_TEXT,
+        rule: 8,
+        explanation: "A chart conclusion and emphasized series require content judgment. Lucid Slides does not alter chart data or styling in local mode.",
+        actionable: false,
+        source: "local-analysis",
+      });
+    }
+
+    const bulletCount = slide.elements.reduce(
+      (sum, element) => sum + element.paragraphs.filter((paragraph) => paragraph.isBullet).length,
+      0,
+    );
+    if (bulletCount >= 3) {
+      findings.push({
+        id: `slide-${slide.slide}-animation-rules-7-11`,
+        slide: slide.slide,
+        objectId: null,
+        elementName: "Slide animation sequence",
+        elementType: "animation",
+        originalText: `${bulletCount} bullet paragraphs detected; all animation data is preserved.`,
+        proposedText: null,
+        placeholderText: "Manual PowerPoint review required — browser-safe animation authoring is not supported.",
+        rule: 7,
+        explanation: "Progressive reveal and appear/fade animation authoring are not implemented because reliable browser-side PowerPoint animation mutation is unavailable.",
+        actionable: false,
+        source: "local-analysis",
+      });
+    }
+  }
+  return findings;
+}
+
+async function sha256(bytes) {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function assertSafePackageNames(names) {
+  for (const name of names) {
+    if (name.startsWith("/") || name.split("/").includes("..")) {
+      throw new Error("The presentation contains an unsafe package path.");
+    }
+  }
+}
+
+function countMatching(names, pattern) {
+  return names.filter((name) => pattern.test(name)).length;
+}
+
+export async function analyzePptx(arrayBuffer, onProgress, zipLibrary = globalThis.JSZip) {
+  if (!zipLibrary?.loadAsync) throw new Error("The safe PowerPoint reader could not be loaded.");
+  const sourceBytes = arrayBuffer instanceof Uint8Array
+    ? arrayBuffer.slice()
+    : new Uint8Array(arrayBuffer.slice(0));
+  const sourceHash = await sha256(sourceBytes);
+  onProgress?.("Validating the presentation package…");
+  const zip = await zipLibrary.loadAsync(sourceBytes);
+  const names = Object.keys(zip.files).filter((name) => !zip.files[name].dir);
+  assertSafePackageNames(names);
+  for (const part of REQUIRED_PARTS) {
+    if (!zip.file(part)) throw new Error(`Missing required PowerPoint package part: ${part}`);
+  }
+
+  const slideFiles = names
+    .map((name) => ({ name, match: name.match(SLIDE_PATH) }))
+    .filter((entry) => entry.match)
+    .sort((a, b) => Number(a.match[1]) - Number(b.match[1]));
+  if (!slideFiles.length) throw new Error("No slides were found in this PowerPoint file.");
+
+  const slides = [];
+  const rawSlideHashes = {};
+  for (const entry of slideFiles) {
+    const slideNumber = Number(entry.match[1]);
+    onProgress?.(`Analyzing slide ${slideNumber} without modifying it…`);
+    const rawBytes = await zip.file(entry.name).async("uint8array");
+    const xml = new TextDecoder().decode(rawBytes);
+    rawSlideHashes[entry.name] = await sha256(rawBytes);
+    slides.push(analyzeSlideXml(xml, slideNumber));
+  }
+
+  onProgress?.("Confirming that the source bytes are unchanged…");
+  const finalHash = await sha256(sourceBytes);
+  if (finalHash !== sourceHash) throw new Error("Safety validation failed: source bytes changed during analysis.");
+
+  const inventory = {
+    packageEntries: names.length,
+    slides: slideFiles.length,
+    media: countMatching(names, /^ppt\/media\//),
+    slideRelationships: countMatching(names, /^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/),
+    notes: countMatching(names, /^ppt\/notesSlides\/notesSlide\d+\.xml$/),
+    charts: countMatching(names, /^ppt\/charts\/chart\d+\.xml$/),
+    tables: slides.reduce((sum, slide) => sum + slide.counts.tables, 0),
+    hyperlinks: slides.reduce((sum, slide) => sum + slide.counts.hyperlinks, 0),
+    imagesReferenced: slides.reduce((sum, slide) => sum + slide.counts.images, 0),
+    words: slides.reduce((sum, slide) => sum + slide.counts.words, 0),
+  };
+
+  return {
+    mode: "analysis-only",
+    sourceHash,
+    sourceBytes: sourceBytes.byteLength,
+    packageValid: true,
+    sourceUnchanged: true,
+    outputPptxCreated: false,
+    rawSlideHashes,
+    inventory,
+    slides,
+    findings: buildLocalFindings(slides),
+    limitations: [
+      "No PowerPoint content, formatting, relationships, media, notes, charts, tables, hyperlinks, or structure was changed.",
+      "No modified PowerPoint file was generated because reliable browser-side mutation has not been proven safe.",
+      "Rules 7 and 11 require manual animation authoring in PowerPoint-compatible software.",
+    ],
+  };
+}
+
+export function createAnalysisSnapshot(analysis) {
+  return {
+    sourceHash: analysis.sourceHash,
+    slides: analysis.slides.slice(0, 80).map((slide) => ({
+      slide: slide.slide,
+      elements: slide.elements.slice(0, 120).map((element) => ({
+        objectId: element.objectId,
+        name: element.name.slice(0, 160),
+        type: element.type,
+        text: element.text.slice(0, 6000),
+      })),
+    })),
+  };
+}
+
+export function validateAiProposals(snapshot, proposals) {
+  const lookup = new Map();
+  for (const slide of snapshot.slides || []) {
+    for (const element of slide.elements || []) lookup.set(`${slide.slide}:${element.objectId}`, element);
+  }
+  if (!Array.isArray(proposals)) return [];
+  const validated = [];
+  for (const proposal of proposals.slice(0, 200)) {
+    const slide = Number(proposal.slide);
+    const objectId = String(proposal.objectId || "");
+    const element = lookup.get(`${slide}:${objectId}`);
+    const originalText = String(proposal.originalText || "");
+    const proposedText = String(proposal.proposedText || "").trim();
+    const explanation = String(proposal.explanation || "").trim();
+    const rule = Number(proposal.rule);
+    if (!element || !originalText || !element.text.includes(originalText)) continue;
+    if (!proposedText || proposedText === originalText || proposedText.length > 1200) continue;
+    if (!explanation || explanation.length > 1000 || !Number.isInteger(rule) || rule < 1 || rule > 12) continue;
+    validated.push({
+      id: `ai-slide-${slide}-element-${objectId}-rule-${rule}-${validated.length + 1}`,
+      slide,
+      objectId,
+      elementName: element.name,
+      elementType: element.type,
+      originalText,
+      proposedText,
+      rule,
+      explanation,
+      actionable: true,
+      source: "openai-analysis",
+      decision: "pending",
+    });
+  }
+  return validated;
+}
+
+export async function simplifyPptx() {
+  throw new Error(
+    "PowerPoint mutation is disabled. Lucid Slides now operates in analysis-only mode and does not create a modified PPTX.",
+  );
+}
+
+export { PLACEHOLDER_TEXT };

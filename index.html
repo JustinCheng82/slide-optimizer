@@ -68,9 +68,8 @@
     background-size:cover;
     background-position:center 30%;
   }
-  /* Original source photo, converted from HEIC for browser compatibility. */
+  /* Keep the embedded source image so deployed builds remain self-contained. */
   .hero-art{
-    background-image:url("hero-original.jpg");
     filter:blur(2px);
     transform:scale(1.008);
   }
@@ -260,8 +259,10 @@
     color:var(--ink);
   }
   #processingBox .log-line{font-size:0.85rem; color:var(--muted); margin-bottom:4px;}
-  #resultBox2 .result-title{font-weight:700; font-size:1.05rem; margin-bottom:14px;}
-  #resultBox2 .download-btn{
+  #resultBox2 .result-title{font-weight:700; font-size:1.15rem; margin-bottom:8px;}
+  #resultBox2 .result-summary{color:var(--muted); line-height:1.5; margin-bottom:14px;}
+  #resultBox2 .next-step{font-size:0.85rem; color:var(--muted); margin-bottom:18px; line-height:1.5;}
+  #resultBox2 .report-btn{
     display:inline-block;
     background:var(--brand);
     color:#fff;
@@ -274,12 +275,31 @@
     font-size:1rem;
     margin-bottom:18px;
   }
-  #resultBox2 .next-step{font-size:0.85rem; color:var(--muted); margin-bottom:18px; line-height:1.5;}
-  #resultBox2 .slide-report{border-top:1px solid #eceae6; padding-top:14px;}
-  #resultBox2 .slide-report h4{font-size:0.9rem; margin-bottom:6px;}
-  #resultBox2 .slide-report ul{margin:0 0 14px 20px; font-size:0.85rem; color:var(--muted); line-height:1.5;}
-  #resultBox2 .tag-done{color:#1b7a3d; font-weight:700;}
-  #resultBox2 .tag-review{color:var(--brand); font-weight:700;}
+  .safety-notice{
+    background:#fff;
+    border-left:4px solid #8a1f1a;
+    color:var(--ink);
+    padding:18px 20px;
+    margin:0 auto 18px;
+    max-width:760px;
+    text-align:left;
+    line-height:1.5;
+  }
+  .safety-notice strong{display:block; margin-bottom:4px;}
+  .mode-notice{background:#eef6fc; border-left:3px solid var(--brand); padding:12px 14px; margin-bottom:16px; line-height:1.45;}
+  .inventory-list{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 20px; margin:0 0 20px 20px; color:var(--muted);}
+  .proposal-card{border-top:1px solid #dcd8d1; padding:20px 0;}
+  .proposal-card h4{font-size:1rem; margin-bottom:4px;}
+  .proposal-meta{font-size:0.82rem; color:var(--brand-dark); margin-bottom:14px;}
+  .proposal-text, .proposal-explanation{margin-bottom:12px;}
+  .proposal-text strong, .proposal-explanation strong{display:block; font-size:0.82rem; margin-bottom:4px;}
+  .proposal-text p, .proposal-explanation p{font-size:0.9rem; color:var(--muted); line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere;}
+  .placeholder-proposal p{font-style:italic;}
+  .proposal-controls{display:flex; flex-wrap:wrap; gap:10px; align-items:center;}
+  .proposal-controls button{font:700 0.88rem var(--font); padding:9px 14px; border:1.5px solid var(--brand); background:#fff; color:var(--brand-dark); cursor:pointer; border-radius:0;}
+  .proposal-controls button[aria-pressed="true"]{background:var(--brand); color:#fff;}
+  .not-actionable{font-size:0.83rem; color:var(--muted);}
+  .empty-findings{color:var(--muted); line-height:1.5; padding:16px 0;}
   #errorBox{
     display:none;
     background:#fff0ef;
@@ -356,7 +376,8 @@
     .export-instructions{padding:18px 20px;}
     .dropzone{padding:62px 24px;}
     #processingBox, #resultBox2{padding:22px 20px;}
-    #resultBox2 .download-btn{text-align:center;}
+    #resultBox2 .report-btn{text-align:center;}
+    .inventory-list{grid-template-columns:1fr;}
 
     #who-we-are p{max-width:none;}
     footer{padding:28px 24px;}
@@ -380,7 +401,7 @@
     .dropzone{padding:54px 16px;}
     .dropzone .dz-title{font-size:1rem;}
     #processingBox, #resultBox2{padding:20px 16px;}
-    #resultBox2 .download-btn{display:block; width:100%;}
+    #resultBox2 .report-btn{display:block; width:100%;}
     footer{padding:24px 16px;}
   }
 </style>
@@ -401,9 +422,9 @@
   <div class="hero-overlay"></div>
   <div class="hero-content">
     <h1><span class="headline-line">Turn cluttered slides into</span><span class="headline-line">focus-friendly presentations</span></h1>
-    <p>Lucid Slides takes your Google Slides and applies research-backed rules that help your slideshow become more engaging. An application built for ADHD and distracted minds, so for your audience, sitting through presentations becomes a piece of cake.</p>
+    <p>Lucid Slides reviews your presentation against research-backed rules and shows proposed improvements for ADHD and distracted minds. Every original slide stays untouched.</p>
     <div class="hero-buttons">
-      <a href="#get-started" class="btn-primary">Simplify My Slides</a>
+      <a href="#get-started" class="btn-primary">Analyze My Slides</a>
       <a href="#research" class="btn-secondary">See Why It Works</a>
     </div>
   </div>
@@ -411,7 +432,7 @@
 
 <section id="research">
   <div class="section-inner">
-    <h2>Our every edit is based on real attention research.</h2>
+    <h2>Every proposed edit is based on real attention research.</h2>
     <p class="lead">Every rule can be traced back to real published research on cognitive load and attention.</p>
     <div class="research-grid">
       <div class="research-card">
@@ -435,8 +456,12 @@
 
 <section id="get-started">
   <div class="section-inner">
-    <h2>Ready to simplify your slides?</h2>
-    <p class="lead">Everything runs right here in your browser — your file is never uploaded anywhere.</p>
+    <h2>Review your slides safely.</h2>
+    <p class="lead">Your PowerPoint file is read locally for analysis. Lucid Slides does not modify it or generate a replacement presentation.</p>
+    <div class="safety-notice">
+      <strong>Analysis-only safety mode</strong>
+      Automatic PowerPoint editing is disabled. You will see review findings and, when configured, meaning-based proposals before any future application workflow is considered.
+    </div>
     <div class="upload-box">
       <div class="export-instructions">
         <div class="export-instructions-title">How to download your google slides presentation:</div>
@@ -445,13 +470,13 @@
           <li>Click File.</li>
           <li>Select Download.</li>
           <li>Choose Microsoft PowerPoint (.pptx).</li>
-          <li>Upload the downloaded .pptx file to the simplification tool.</li>
+          <li>Upload the downloaded .pptx file for read-only analysis.</li>
         </ol>
       </div>
       <div class="dropzone" id="dropzone">
         <div class="dz-icon">📄</div>
-        <div class="dz-title">Drag and drop your .pptx file here</div>
-        <div class="dz-sub">or click to browse</div>
+        <div class="dz-title">Drag and drop your .pptx file for safe analysis</div>
+        <div class="dz-sub">or click to browse — no modified PowerPoint will be generated</div>
         <input type="file" id="fileInput" accept=".pptx">
       </div>
 
@@ -460,10 +485,13 @@
       <div id="errorBox"></div>
 
       <div id="resultBox2">
-        <div class="result-title">Done — here's your simplified deck.</div>
-        <a href="#" id="downloadLink" class="download-btn" download="simplified.pptx">Download Simplified.pptx</a>
-        <div class="next-step">To turn this back into a Google Slides file: upload it to Google Drive, then right-click it and choose "Open with → Google Slides" (or just double-click it in Drive — Drive offers to open .pptx files as Google Slides automatically).</div>
-        <div id="slideReportContainer"></div>
+        <div class="result-title" id="resultTitle">Analysis complete.</div>
+        <p class="result-summary" id="resultSummary"></p>
+        <div class="mode-notice" id="modeNotice"></div>
+        <ul class="inventory-list" id="inventoryList"></ul>
+        <a href="#" id="reportDownload" class="report-btn" download="lucid-slides-analysis.json">Download analysis report</a>
+        <div class="next-step">Approvals and rejections are recorded only in the report. No edit is applied and no PowerPoint copy is created until a targeted mutation workflow passes compatibility testing.</div>
+        <div id="proposalContainer"></div>
       </div>
     </div>
   </div>
@@ -490,122 +518,6 @@
 
 
 <script src="jszip.min.js"></script>
-<script src="simplify-engine.js"></script>
-<script>
-(function () {
-  const dropzone = document.getElementById("dropzone");
-  const fileInput = document.getElementById("fileInput");
-  const processingBox = document.getElementById("processingBox");
-  const errorBox = document.getElementById("errorBox");
-  const resultBox = document.getElementById("resultBox2");
-  const downloadLink = document.getElementById("downloadLink");
-  const slideReportContainer = document.getElementById("slideReportContainer");
-
-  function resetPanels() {
-    processingBox.style.display = "none";
-    processingBox.innerHTML = "";
-    errorBox.style.display = "none";
-    errorBox.textContent = "";
-    resultBox.style.display = "none";
-    slideReportContainer.innerHTML = "";
-  }
-
-  function logLine(msg) {
-    processingBox.style.display = "block";
-    const line = document.createElement("div");
-    line.className = "log-line";
-    line.textContent = msg;
-    processingBox.appendChild(line);
-  }
-
-  function showError(msg) {
-    errorBox.style.display = "block";
-    errorBox.textContent = msg;
-  }
-
-  function renderReport(report) {
-    slideReportContainer.innerHTML = "";
-    if (!report.length) {
-      const p = document.createElement("p");
-      p.textContent = "No changes were needed.";
-      slideReportContainer.appendChild(p);
-      return;
-    }
-    report.forEach((sr) => {
-      const wrap = document.createElement("div");
-      wrap.className = "slide-report";
-      const h4 = document.createElement("h4");
-      h4.textContent = "Slide " + sr.slide;
-      wrap.appendChild(h4);
-      if (sr.changes.length) {
-        const ul = document.createElement("ul");
-        sr.changes.forEach((c) => {
-          const li = document.createElement("li");
-          li.innerHTML = '<span class="tag-done">Done:</span> ' + c;
-          ul.appendChild(li);
-        });
-        wrap.appendChild(ul);
-      }
-      if (sr.flags.length) {
-        const ul = document.createElement("ul");
-        sr.flags.forEach((c) => {
-          const li = document.createElement("li");
-          li.innerHTML = '<span class="tag-review">Review:</span> ' + c;
-          ul.appendChild(li);
-        });
-        wrap.appendChild(ul);
-      }
-      slideReportContainer.appendChild(wrap);
-    });
-  }
-
-  async function handleFile(file) {
-    resetPanels();
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".pptx")) {
-      showError("That's not a .pptx file. Export your Google Slides deck as PowerPoint (.pptx) first, then drop that file here.");
-      return;
-    }
-    try {
-      logLine("Reading " + file.name + "...");
-      const arrayBuffer = await file.arrayBuffer();
-      const { blob, report } = await simplifyPptx(arrayBuffer, logLine);
-
-      const url = URL.createObjectURL(blob);
-      downloadLink.href = url;
-      const outName = file.name.replace(/\.pptx$/i, "") + " (simplified).pptx";
-      downloadLink.setAttribute("download", outName);
-
-      resultBox.style.display = "block";
-      renderReport(report);
-      processingBox.style.display = "none";
-    } catch (err) {
-      console.error(err);
-      showError("Something went wrong reading that file: " + err.message + ". Make sure it's a valid, non-corrupted .pptx exported from Google Slides or PowerPoint.");
-      processingBox.style.display = "none";
-    }
-  }
-
-  dropzone.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", (e) => handleFile(e.target.files[0]));
-
-  ["dragenter", "dragover"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => {
-      e.preventDefault();
-      dropzone.classList.add("dragover");
-    })
-  );
-  ["dragleave", "drop"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => {
-      e.preventDefault();
-      dropzone.classList.remove("dragover");
-    })
-  );
-  dropzone.addEventListener("drop", (e) => {
-    const file = e.dataTransfer.files[0];
-    handleFile(file);
-  });
-})();
-</script>
+<script type="module" src="app.js"></script>
 </body>
 </html>
