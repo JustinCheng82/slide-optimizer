@@ -1,22 +1,22 @@
-import { proposalSchema, validateProposalResponse, validateSnapshot } from "../lib/proposals.js";
-
+import { validateProposalResponse, validateSnapshot } from "../lib/proposals.js";
+ 
 const WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 12;
 const buckets = new Map();
-
+ 
 function setSecurityHeaders(response) {
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
 }
-
+ 
 function allowOrigin(request) {
   const configured = process.env.ALLOWED_ORIGIN;
   if (!configured) return true;
   return request.headers.origin === configured;
 }
-
+ 
 function rateLimited(request) {
   const now = Date.now();
   const key = String(request.headers["x-forwarded-for"] || request.socket?.remoteAddress || "unknown").split(",")[0];
@@ -28,12 +28,12 @@ function rateLimited(request) {
   bucket.count += 1;
   return bucket.count > MAX_REQUESTS_PER_WINDOW;
 }
-
+ 
 function bodySize(request) {
   if (typeof request.body === "string") return Buffer.byteLength(request.body);
   return Buffer.byteLength(JSON.stringify(request.body || {}));
 }
-
+ 
 export default async function handler(request, response) {
   setSecurityHeaders(response);
   if (request.method !== "POST") return response.status(405).json({ error: "Method not allowed." });
@@ -43,7 +43,7 @@ export default async function handler(request, response) {
   }
   if (bodySize(request) > 750_000) return response.status(413).json({ error: "Analysis request is too large." });
   if (rateLimited(request)) return response.status(429).json({ error: "Too many analysis requests. Try again shortly." });
-
+ 
   let snapshot;
   try {
     const body = typeof request.body === "string" ? JSON.parse(request.body) : request.body;
@@ -51,7 +51,7 @@ export default async function handler(request, response) {
   } catch (error) {
     return response.status(400).json({ error: error.message });
   }
-
+ 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
     return response.status(503).json({
@@ -60,8 +60,7 @@ export default async function handler(request, response) {
       message: "AI analysis is not configured. Local findings are available and the presentation remains unchanged.",
     });
   }
-
-  const schema = proposalSchema();
+ 
   const prompt = [
     "Analyze this presentation snapshot and propose optional edits; never claim an edit was applied.",
     "Every proposal must identify an existing slide and objectId and quote exact originalText from that element.",
@@ -69,12 +68,16 @@ export default async function handler(request, response) {
     "Do not propose deleting logos, icons, diagrams, charts, tables, citations, hyperlinks, or images without clear meaning-based evidence.",
     "Focus on rules 1-6, 8-10, and 12. Rules 7 and 11 require manual animation work and must not be proposed as automatic edits.",
     "Return only proposals worth showing to a human for approval. It is valid to return an empty list.",
-    "Respond with ONLY a single JSON object matching this JSON Schema exactly (no markdown, no commentary):",
-    JSON.stringify(schema),
+    "Return at most the 15 most impactful proposals, even if more could apply — this keeps the response from being cut off.",
+    "",
+    'Respond with ONLY a JSON object in exactly this shape, nothing else:',
+    '{"proposals":[{"slide":1,"objectId":"123","originalText":"exact original text","proposedText":"your rewrite","rule":3,"explanation":"why this helps"}]}',
+    'If nothing is worth changing, respond with {"proposals":[]}',
+    "",
     "Presentation snapshot:",
     JSON.stringify(snapshot),
-  ].join("\n\n");
-
+  ].join("\n");
+ 
   try {
     const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -83,8 +86,9 @@ export default async function handler(request, response) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
         temperature: 0.2,
+        max_tokens: 8192,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -112,3 +116,4 @@ export default async function handler(request, response) {
     return response.status(502).json({ error: "The analysis service returned an invalid response." });
   }
 }
+ 
