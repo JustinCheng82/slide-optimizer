@@ -34,16 +34,6 @@ function bodySize(request) {
   return Buffer.byteLength(JSON.stringify(request.body || {}));
 }
 
-function responseText(payload) {
-  if (typeof payload.output_text === "string") return payload.output_text;
-  for (const item of payload.output || []) {
-    for (const content of item.content || []) {
-      if (content.type === "output_text" && typeof content.text === "string") return content.text;
-    }
-  }
-  return "";
-}
-
 export default async function handler(request, response) {
   setSecurityHeaders(response);
   if (request.method !== "POST") return response.status(405).json({ error: "Method not allowed." });
@@ -62,7 +52,8 @@ export default async function handler(request, response) {
     return response.status(400).json({ error: error.message });
   }
 
-  if (!process.env.OPENAI_API_KEY) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
     return response.status(503).json({
       mode: "analysis-only",
       proposals: [],
@@ -70,6 +61,7 @@ export default async function handler(request, response) {
     });
   }
 
+  const schema = proposalSchema();
   const prompt = [
     "Analyze this presentation snapshot and propose optional edits; never claim an edit was applied.",
     "Every proposal must identify an existing slide and objectId and quote exact originalText from that element.",
@@ -77,42 +69,46 @@ export default async function handler(request, response) {
     "Do not propose deleting logos, icons, diagrams, charts, tables, citations, hyperlinks, or images without clear meaning-based evidence.",
     "Focus on rules 1-6, 8-10, and 12. Rules 7 and 11 require manual animation work and must not be proposed as automatic edits.",
     "Return only proposals worth showing to a human for approval. It is valid to return an empty list.",
+    "Respond with ONLY a single JSON object matching this JSON Schema exactly (no markdown, no commentary):",
+    JSON.stringify(schema),
+    "Presentation snapshot:",
     JSON.stringify(snapshot),
   ].join("\n\n");
 
   try {
-    const openAiResponse = await fetch("https://api.openai.com/v1/responses", {
+    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        store: false,
-        input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "lucid_slide_proposals",
-            strict: true,
-            schema: proposalSchema(),
+        model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "You are an assistant that returns only valid JSON matching the schema the user provides. Never include prose outside the JSON object.",
           },
-        },
+          { role: "user", content: prompt },
+        ],
       }),
     });
-    const payload = await openAiResponse.json().catch(() => ({}));
-    if (!openAiResponse.ok) {
+    const payload = await groqResponse.json().catch(() => ({}));
+    if (!groqResponse.ok) {
+      console.error("Groq analysis failed", payload?.error || groqResponse.status);
       return response.status(502).json({ error: "The analysis service was unavailable." });
     }
-    const parsed = JSON.parse(responseText(payload));
+    const text = payload?.choices?.[0]?.message?.content || "{}";
+    const parsed = JSON.parse(text);
     return response.status(200).json({
       mode: "proposal-review",
       proposals: validateProposalResponse(snapshot, parsed),
       applied: false,
     });
   } catch (error) {
-    console.error("OpenAI analysis failed", error);
+    console.error("Groq analysis failed", error);
     return response.status(502).json({ error: "The analysis service returned an invalid response." });
   }
 }
