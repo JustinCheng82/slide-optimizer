@@ -4,7 +4,7 @@ import {
   validateAiProposals,
   applyProposalsToPptx,
 } from "./simplify-engine.js";
-
+ 
 const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
 const processingBox = document.getElementById("processingBox");
@@ -16,11 +16,18 @@ const modeNotice = document.getElementById("modeNotice");
 const inventoryList = document.getElementById("inventoryList");
 const pptxDownload = document.getElementById("pptxDownload");
 const reportDownload = document.getElementById("reportDownload");
-
+ 
+for (const [id, el] of Object.entries({
+  dropzone, fileInput, processingBox, errorBox, resultBox2: resultBox,
+  resultTitle, resultSummary, modeNotice, inventoryList, pptxDownload, reportDownload,
+})) {
+  if (!el) console.error(`Lucid Slides: #${id} is missing from this page — index.html and app.js are probably not the same version. File uploads will not work until this is fixed.`);
+}
+ 
 let currentReportUrl = "";
 let currentPptxUrl = "";
 let currentResult = null;
-
+ 
 function resetPanels() {
   processingBox.style.display = "none";
   processingBox.replaceChildren();
@@ -35,7 +42,7 @@ function resetPanels() {
   pptxDownload.style.display = "none";
   currentResult = null;
 }
-
+ 
 function logLine(message) {
   processingBox.style.display = "block";
   const line = document.createElement("div");
@@ -43,12 +50,12 @@ function logLine(message) {
   line.textContent = message;
   processingBox.appendChild(line);
 }
-
+ 
 function showError(message) {
   errorBox.style.display = "block";
   errorBox.textContent = message;
 }
-
+ 
 function appendInventory(label, value) {
   const item = document.createElement("li");
   const strong = document.createElement("strong");
@@ -56,7 +63,7 @@ function appendInventory(label, value) {
   item.append(strong, document.createTextNode(label));
   inventoryList.appendChild(item);
 }
-
+ 
 function updateReportDownload(appliedCount, skippedCount) {
   if (!currentResult) return;
   const report = {
@@ -75,7 +82,7 @@ function updateReportDownload(appliedCount, skippedCount) {
   reportDownload.href = currentReportUrl;
   reportDownload.download = currentResult.fileName.replace(/\.pptx$/i, "") + " — Lucid Slides summary.json";
 }
-
+ 
 async function requestAiProposals(analysis) {
   const snapshot = createAnalysisSnapshot(analysis);
   try {
@@ -100,15 +107,20 @@ async function requestAiProposals(analysis) {
     };
   }
 }
-
+ 
 async function handleFile(file) {
-  resetPanels();
+  try {
+    resetPanels();
+  } catch (error) {
+    console.error("Lucid Slides: failed to reset the page before reading a file — index.html and app.js may not be the same version.", error);
+    return;
+  }
   if (!file) return;
   if (!file.name.toLowerCase().endsWith(".pptx")) {
     showError("Choose a .pptx file. Lucid Slides reads it locally for analysis and does not create a modified presentation.");
     return;
   }
-
+ 
   try {
     logLine(`Reading ${file.name} locally…`);
     const arrayBuffer = await file.arrayBuffer();
@@ -116,7 +128,7 @@ async function handleFile(file) {
     logLine("Requesting simplification suggestions…");
     const ai = await requestAiProposals(analysis);
     currentResult = { fileName: file.name, analysis };
-
+ 
     let appliedCount = 0;
     let skippedCount = 0;
     if (ai.proposals.length) {
@@ -132,7 +144,7 @@ async function handleFile(file) {
         pptxDownload.style.display = "inline-block";
       }
     }
-
+ 
     if (appliedCount) {
       resultTitle.textContent = "Your simplified presentation is ready.";
       resultSummary.textContent = `${analysis.inventory.slides} slides and ${analysis.inventory.words.toLocaleString()} words were reviewed. ${appliedCount} change${appliedCount === 1 ? "" : "s"} applied to a new copy — your original file was left untouched.`;
@@ -150,7 +162,7 @@ async function handleFile(file) {
     appendInventory("tables detected and preserved", analysis.inventory.tables);
     appendInventory("hyperlinked paragraphs detected and preserved", analysis.inventory.hyperlinks);
     updateReportDownload(appliedCount, skippedCount);
-
+ 
     processingBox.style.display = "none";
     resultBox.style.display = "block";
     resultBox.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -160,7 +172,7 @@ async function handleFile(file) {
     showError(`Lucid Slides could not safely analyze that file: ${error.message}`);
   }
 }
-
+ 
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
@@ -169,7 +181,7 @@ dropzone.addEventListener("keydown", (event) => {
   }
 });
 fileInput.addEventListener("change", (event) => handleFile(event.target.files[0]));
-
+ 
 for (const eventName of ["dragenter", "dragover"]) {
   dropzone.addEventListener(eventName, (event) => {
     event.preventDefault();
@@ -183,3 +195,4 @@ for (const eventName of ["dragleave", "drop"]) {
   });
 }
 dropzone.addEventListener("drop", (event) => handleFile(event.dataTransfer.files[0]));
+ 
