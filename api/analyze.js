@@ -69,7 +69,8 @@ export default async function handler(request, response) {
     "Focus on rules 1-6, 8-10, and 12. Rules 7 and 11 require manual animation work and must not be proposed as automatic edits.",
     "Review every slide in the snapshot, not just the first few or the ones that stand out most. Slides with three or more bullet points or dense paragraphs need special attention: if several lines on the same slide are wordy or unclear, propose an edit for each one that needs it, not just the single worst line on that slide.",
     "Return only proposals worth showing to a human for approval — it is valid to skip a slide entirely if every line on it is already clear and concise. It is valid to return an empty list.",
-    "Return at most 40 proposals total. If more than 40 slide lines deserve an edit, keep the 40 most impactful ones spread across the whole deck rather than concentrating them on one or two slides.",
+    "Return at most 20 proposals total. If more than 20 slide lines deserve an edit, keep the 20 most impactful ones spread across the whole deck rather than concentrating them on one or two slides.",
+    "Keep each explanation to one short sentence (15 words or fewer) — this keeps the response compact and within the account's token limits.",
     "",
     'Respond with ONLY a JSON object in exactly this shape, nothing else:',
     '{"proposals":[{"slide":1,"objectId":"123","originalText":"exact original text","proposedText":"your rewrite","rule":3,"explanation":"why this helps"}]}',
@@ -78,7 +79,20 @@ export default async function handler(request, response) {
     "Presentation snapshot:",
     JSON.stringify(snapshot),
   ].join("\n");
- 
+
+  // Groq enforces a tokens-per-minute cap that counts prompt tokens PLUS the
+  // requested max_tokens up front (not just actual usage). A fixed max_tokens
+  // can exceed that cap on larger decks, so size it dynamically against a
+  // rough prompt-token estimate (~4 chars/token) instead of a flat constant.
+  const TPM_BUDGET = 7500; // stays under the 8000 TPM limit seen on smaller Groq tiers, with margin
+  const estimatedPromptTokens = Math.ceil(prompt.length / 4);
+  const maxCompletionTokens = Math.max(1200, Math.min(6000, TPM_BUDGET - estimatedPromptTokens));
+  if (estimatedPromptTokens >= TPM_BUDGET) {
+    return response.status(413).json({
+      error: "This presentation is too large for AI analysis on the current Groq plan/model. Try a smaller deck, or raise the account's token limit.",
+    });
+  }
+
   try {
     const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -89,7 +103,7 @@ export default async function handler(request, response) {
       body: JSON.stringify({
         model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
         temperature: 0.2,
-        max_tokens: 8192,
+        max_tokens: maxCompletionTokens,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -103,6 +117,11 @@ export default async function handler(request, response) {
     const payload = await groqResponse.json().catch(() => ({}));
     if (!groqResponse.ok) {
       console.error("Groq analysis failed", payload?.error || groqResponse.status);
+      if (payload?.error?.code === "rate_limit_exceeded") {
+        return response.status(429).json({
+          error: "The AI analysis account hit its per-minute token limit. Wait a moment and try again, or switch GROQ_MODEL to a smaller model with a higher limit in Vercel's environment variables.",
+        });
+      }
       return response.status(502).json({ error: "The analysis service was unavailable." });
     }
     const text = payload?.choices?.[0]?.message?.content || "{}";
